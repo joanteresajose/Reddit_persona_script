@@ -14,8 +14,7 @@ import aiofiles
 import asyncio
 import re
 from urllib.parse import urlparse
-import requests
-from bs4 import BeautifulSoup
+import praw
 import time
 import json
 from emergentintegrations.llm.chat import LlmChat, UserMessage
@@ -54,13 +53,14 @@ class PersonaCreate(BaseModel):
     citations: dict
     file_path: str
 
-# Reddit Scraper Class
+# Reddit Scraper Class using PRAW
 class RedditScraper:
     def __init__(self):
-        self.session = requests.Session()
-        self.session.headers.update({
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
-        })
+        self.reddit = praw.Reddit(
+            client_id=os.environ.get('REDDIT_CLIENT_ID'),
+            client_secret=os.environ.get('REDDIT_CLIENT_SECRET'),
+            user_agent=f'PersonaExtractor:1.0 (by /u/{os.environ.get("REDDIT_USERNAME", "user")})'
+        )
 
     def extract_username(self, reddit_url: str) -> str:
         """Extract username from Reddit URL"""
@@ -71,56 +71,64 @@ class RedditScraper:
         raise ValueError("Invalid Reddit user URL format")
 
     def scrape_reddit_profile(self, reddit_url: str) -> dict:
-        """Scrape Reddit profile posts and comments"""
+        """Scrape Reddit profile posts and comments using PRAW"""
         username = self.extract_username(reddit_url)
         
-        posts = []
-        comments = []
-        
-        # Scrape posts
         try:
-            posts_url = f"https://www.reddit.com/user/{username}/submitted/.json"
-            response = self.session.get(posts_url)
-            if response.status_code == 200:
-                posts_data = response.json()
-                for post in posts_data.get('data', {}).get('children', []):
-                    post_data = post.get('data', {})
+            # Get the redditor
+            redditor = self.reddit.redditor(username)
+            
+            # Test if user exists
+            try:
+                # This will raise an exception if user doesn't exist
+                redditor.id
+            except Exception:
+                raise ValueError(f"Reddit user '{username}' not found or is suspended")
+            
+            posts = []
+            comments = []
+            
+            # Scrape posts (submissions)
+            try:
+                for submission in redditor.submissions.new(limit=50):
                     posts.append({
                         'type': 'post',
-                        'title': post_data.get('title', ''),
-                        'selftext': post_data.get('selftext', ''),
-                        'subreddit': post_data.get('subreddit', ''),
-                        'score': post_data.get('score', 0),
-                        'created_utc': post_data.get('created_utc', 0),
-                        'url': f"https://www.reddit.com{post_data.get('permalink', '')}"
+                        'title': submission.title,
+                        'selftext': submission.selftext,
+                        'subreddit': str(submission.subreddit),
+                        'score': submission.score,
+                        'created_utc': submission.created_utc,
+                        'url': f"https://www.reddit.com{submission.permalink}",
+                        'num_comments': submission.num_comments
                     })
-        except Exception as e:
-            print(f"Error scraping posts: {e}")
+            except Exception as e:
+                print(f"Error scraping posts: {e}")
 
-        # Scrape comments
-        try:
-            comments_url = f"https://www.reddit.com/user/{username}/comments/.json"
-            response = self.session.get(comments_url)
-            if response.status_code == 200:
-                comments_data = response.json()
-                for comment in comments_data.get('data', {}).get('children', []):
-                    comment_data = comment.get('data', {})
+            # Scrape comments
+            try:
+                for comment in redditor.comments.new(limit=100):
                     comments.append({
                         'type': 'comment',
-                        'body': comment_data.get('body', ''),
-                        'subreddit': comment_data.get('subreddit', ''),
-                        'score': comment_data.get('score', 0),
-                        'created_utc': comment_data.get('created_utc', 0),
-                        'url': f"https://www.reddit.com{comment_data.get('permalink', '')}"
+                        'body': comment.body,
+                        'subreddit': str(comment.subreddit),
+                        'score': comment.score,
+                        'created_utc': comment.created_utc,
+                        'url': f"https://www.reddit.com{comment.permalink}",
+                        'is_submitter': comment.is_submitter
                     })
-        except Exception as e:
-            print(f"Error scraping comments: {e}")
+            except Exception as e:
+                print(f"Error scraping comments: {e}")
 
-        return {
-            'username': username,
-            'posts': posts,
-            'comments': comments
-        }
+            return {
+                'username': username,
+                'posts': posts,
+                'comments': comments,
+                'total_posts': len(posts),
+                'total_comments': len(comments)
+            }
+            
+        except Exception as e:
+            raise ValueError(f"Error scraping Reddit profile: {str(e)}")
 
 # Persona Analysis Class
 class PersonaAnalyzer:
@@ -144,27 +152,80 @@ class PersonaAnalyzer:
         prompt = f"""
         Analyze the following Reddit posts and comments from user '{scraped_data['username']}' and create a detailed user persona.
 
-        Content to analyze:
+        CONTENT STATISTICS:
+        - Total Posts: {scraped_data.get('total_posts', 0)}
+        - Total Comments: {scraped_data.get('total_comments', 0)}
+
+        CONTENT TO ANALYZE:
         {content_text}
 
-        Please provide a comprehensive user persona with the following sections:
-        1. Demographics (age range, gender, location if identifiable)
-        2. Personality Traits (Big Five personality traits, communication style)
-        3. Interests and Hobbies
-        4. Values and Beliefs
-        5. Behavioral Patterns
-        6. Technology Usage
-        7. Social Media Behavior
-        8. Professional/Career Interests
-        9. Lifestyle Preferences
-        10. Communication Style
+        Please provide a comprehensive user persona analysis in JSON format with the following sections:
 
-        For each characteristic, provide:
-        - The specific trait/interest/behavior
-        - Confidence level (High/Medium/Low)
-        - Key evidence from the content
+        {{
+          "demographics": {{
+            "age_range": "estimated age range with confidence level",
+            "gender": "estimated gender with confidence level",
+            "location": "estimated location/region with confidence level",
+            "education": "estimated education level with confidence level"
+          }},
+          "personality_traits": {{
+            "openness": "level and evidence",
+            "conscientiousness": "level and evidence",
+            "extraversion": "level and evidence",
+            "agreeableness": "level and evidence",
+            "neuroticism": "level and evidence",
+            "communication_style": "description of how they communicate"
+          }},
+          "interests_and_hobbies": {{
+            "primary_interests": ["list of main interests"],
+            "hobbies": ["list of hobbies"],
+            "entertainment": ["preferred entertainment types"],
+            "sports": ["sports interests if any"]
+          }},
+          "values_and_beliefs": {{
+            "core_values": ["list of core values"],
+            "political_leanings": "political orientation with confidence level",
+            "social_causes": ["causes they care about"],
+            "life_philosophy": "their general life philosophy"
+          }},
+          "behavioral_patterns": {{
+            "posting_frequency": "how often they post",
+            "engagement_style": "how they engage with others",
+            "content_preferences": "what type of content they prefer",
+            "reaction_patterns": "how they typically react to things"
+          }},
+          "technology_usage": {{
+            "platform_activity": "how they use Reddit",
+            "digital_literacy": "their tech comfort level",
+            "online_behavior": "their general online behavior patterns"
+          }},
+          "social_behavior": {{
+            "social_interaction": "how they interact socially",
+            "community_involvement": "their involvement in communities",
+            "leadership_qualities": "any leadership traits shown",
+            "conflict_resolution": "how they handle conflicts"
+          }},
+          "professional_interests": {{
+            "career_field": "estimated career field",
+            "professional_skills": ["skills they demonstrate"],
+            "work_style": "their approach to work",
+            "career_goals": "any career aspirations mentioned"
+          }},
+          "lifestyle_preferences": {{
+            "daily_routine": "insights into their daily life",
+            "leisure_activities": ["how they spend free time"],
+            "consumption_habits": "their consumption patterns",
+            "health_wellness": "their approach to health and wellness"
+          }},
+          "communication_patterns": {{
+            "language_style": "their writing/communication style",
+            "humor_type": "their sense of humor",
+            "emotional_expression": "how they express emotions",
+            "persuasion_style": "how they try to persuade others"
+          }}
+        }}
 
-        Format your response as a JSON object with clear sections and evidence.
+        For each trait, provide specific evidence from their posts/comments and indicate confidence level (High/Medium/Low).
         """
         
         user_message = UserMessage(text=prompt)
@@ -184,13 +245,15 @@ class PersonaAnalyzer:
             content_parts.append(f"POST in r/{post['subreddit']}: {post['title']}")
             if post['selftext']:
                 content_parts.append(f"Content: {post['selftext']}")
-            content_parts.append(f"Score: {post['score']}, URL: {post['url']}")
+            content_parts.append(f"Score: {post['score']}, Comments: {post['num_comments']}")
+            content_parts.append(f"URL: {post['url']}")
             content_parts.append("---")
         
         # Add comments  
         for comment in scraped_data.get('comments', []):
             content_parts.append(f"COMMENT in r/{comment['subreddit']}: {comment['body']}")
-            content_parts.append(f"Score: {comment['score']}, URL: {comment['url']}")
+            content_parts.append(f"Score: {comment['score']}")
+            content_parts.append(f"URL: {comment['url']}")
             content_parts.append("---")
         
         return "\n".join(content_parts)
@@ -225,16 +288,16 @@ class PersonaAnalyzer:
     def _create_fallback_persona(self, response: str) -> dict:
         """Create a fallback persona structure if JSON parsing fails"""
         return {
-            'demographics': {'raw_analysis': response},
-            'personality_traits': {'raw_analysis': response},
-            'interests': {'raw_analysis': response},
-            'values': {'raw_analysis': response},
-            'behavioral_patterns': {'raw_analysis': response},
-            'technology_usage': {'raw_analysis': response},
-            'social_media_behavior': {'raw_analysis': response},
-            'professional_interests': {'raw_analysis': response},
-            'lifestyle': {'raw_analysis': response},
-            'communication_style': {'raw_analysis': response}
+            'demographics': {'analysis': response[:500] + '...'},
+            'personality_traits': {'analysis': response[:500] + '...'},
+            'interests_and_hobbies': {'analysis': response[:500] + '...'},
+            'values_and_beliefs': {'analysis': response[:500] + '...'},
+            'behavioral_patterns': {'analysis': response[:500] + '...'},
+            'technology_usage': {'analysis': response[:500] + '...'},
+            'social_behavior': {'analysis': response[:500] + '...'},
+            'professional_interests': {'analysis': response[:500] + '...'},
+            'lifestyle_preferences': {'analysis': response[:500] + '...'},
+            'communication_patterns': {'analysis': response[:500] + '...'}
         }
     
     def _create_citations(self, persona_data: dict, scraped_data: dict) -> dict:
@@ -247,15 +310,16 @@ class PersonaAnalyzer:
         for section, data in persona_data.items():
             citations[section] = []
             
-            # Find relevant content for this section
-            for item in all_content[:10]:  # Limit to first 10 items
+            # Find relevant content for this section (top 5 items)
+            for item in all_content[:5]:
                 content_text = item.get('title', '') + ' ' + item.get('selftext', '') + ' ' + item.get('body', '')
                 citations[section].append({
                     'type': item.get('type', 'unknown'),
-                    'content': content_text[:200] + '...' if len(content_text) > 200 else content_text,
+                    'content': content_text[:300] + '...' if len(content_text) > 300 else content_text,
                     'url': item.get('url', ''),
                     'subreddit': item.get('subreddit', ''),
-                    'score': item.get('score', 0)
+                    'score': item.get('score', 0),
+                    'created_utc': item.get('created_utc', 0)
                 })
         
         return citations
@@ -356,14 +420,14 @@ Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
     sections = {
         'demographics': 'DEMOGRAPHICS',
         'personality_traits': 'PERSONALITY TRAITS', 
-        'interests': 'INTERESTS AND HOBBIES',
-        'values': 'VALUES AND BELIEFS',
+        'interests_and_hobbies': 'INTERESTS AND HOBBIES',
+        'values_and_beliefs': 'VALUES AND BELIEFS',
         'behavioral_patterns': 'BEHAVIORAL PATTERNS',
         'technology_usage': 'TECHNOLOGY USAGE',
-        'social_media_behavior': 'SOCIAL MEDIA BEHAVIOR',
+        'social_behavior': 'SOCIAL BEHAVIOR',
         'professional_interests': 'PROFESSIONAL/CAREER INTERESTS',
-        'lifestyle': 'LIFESTYLE PREFERENCES',
-        'communication_style': 'COMMUNICATION STYLE'
+        'lifestyle_preferences': 'LIFESTYLE PREFERENCES',
+        'communication_patterns': 'COMMUNICATION PATTERNS'
     }
     
     for key, title in sections.items():
@@ -372,7 +436,10 @@ Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
         section_data = persona.get(key, {})
         if isinstance(section_data, dict):
             for trait, details in section_data.items():
-                content += f"• {trait}: {details}\n"
+                if isinstance(details, list):
+                    content += f"• {trait}: {', '.join(details)}\n"
+                else:
+                    content += f"• {trait}: {details}\n"
         else:
             content += f"{section_data}\n"
         
