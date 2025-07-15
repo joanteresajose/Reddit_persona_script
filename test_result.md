@@ -229,8 +229,7 @@ metadata:
 test_plan:
   current_focus:
     - "Reddit Profile URL Scraping"
-  stuck_tasks:
-    - "Reddit Profile URL Scraping"
+  stuck_tasks: []
   test_all: false
   test_priority: "high_first"
 
