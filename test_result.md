@@ -223,9 +223,8 @@ metadata:
 test_plan:
   current_focus:
     - "Reddit Profile URL Scraping"
-    - "LLM Persona Analysis with Gemini"
-    - "File Generation with Citations"
-  stuck_tasks: []
+  stuck_tasks:
+    - "Reddit Profile URL Scraping"
   test_all: false
   test_priority: "high_first"
 
